@@ -37,152 +37,193 @@ const bookTennis = async () => {
 
   try {
     const locations = !Array.isArray(config.locations) ? Object.keys(config.locations) : config.locations
+    const MAX_ATTEMPTS_PER_LOCATION = 2
     locationsLoop:
     for (const [i, location] of locations.entries()) {
       const logLocation = process.env.GITHUB_ACTIONS ? `location ${i + 1}` : location
-      console.log(`${dayjs().format()} - Search at ${logLocation}`)
-      await page.goto('https://tennis.paris.fr/tennis/jsp/site/Portal.jsp?page=recherche&view=recherche_creneau#!')
+      let submitted = false
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_LOCATION; attempt++) {
+      try {
+        console.log(`${dayjs().format()} - Search at ${logLocation}${attempt > 1 ? ` (tentative ${attempt})` : ''}`)
+        await page.goto('https://tennis.paris.fr/tennis/jsp/site/Portal.jsp?page=recherche&view=recherche_creneau#!')
 
-      // select tennis location
-      await page.locator('.tokens-input-text').pressSequentially(`${location} `)
-      await page.waitForSelector(`.tokens-suggestions-list-element >> text="${location}"`)
-      await page.click(`.tokens-suggestions-list-element >> text="${location}"`)
+        // select tennis location
+        await page.locator('.tokens-input-text').pressSequentially(`${location} `)
+        await page.waitForSelector(`.tokens-suggestions-list-element >> text="${location}"`)
+        await page.click(`.tokens-suggestions-list-element >> text="${location}"`)
 
-      // select date
-      await page.click('#when')
-      const date = config.date ? dayjs(config.date, 'D/MM/YYYY') : dayjs().add(6, 'days')
-      await page.waitForSelector(`[dateiso="${date.format('DD/MM/YYYY')}"]`)
-      await page.click(`[dateiso="${date.format('DD/MM/YYYY')}"]`)
-      await page.waitForSelector('.date-picker', { state: 'hidden' })
+        // select date
+        await page.click('#when')
+        const date = config.date ? dayjs(config.date, 'D/MM/YYYY') : dayjs().add(6, 'days')
+        await page.waitForSelector(`[dateiso="${date.format('DD/MM/YYYY')}"]`)
+        await page.click(`[dateiso="${date.format('DD/MM/YYYY')}"]`)
+        await page.waitForSelector('.date-picker', { state: 'hidden' })
 
-      await page.click('#rechercher')
+        await page.click('#rechercher')
 
-      // wait until the results page is fully loaded before continue
-      await page.waitForLoadState('domcontentloaded')
+        // wait until the results page is fully loaded before continue
+        await page.waitForLoadState('domcontentloaded')
 
-      let selectedHour
-      hoursLoop:
-      for (const hour of config.hours) {
-        const dateDeb = `[datedeb="${date.format('YYYY/MM/DD')} ${hour}:00:00"]`
-        if (await page.locator(dateDeb).count()) {
-          if (await page.isHidden(dateDeb)) {
-            await page.click(`#head${location.replaceAll(' ', '')}${hour}h .panel-title`)
-          }
+        let selectedHour
+        hoursLoop:
+        for (const hour of config.hours) {
+          const dateDeb = `[datedeb="${date.format('YYYY/MM/DD')} ${hour}:00:00"]`
+          if (await page.locator(dateDeb).count()) {
+            if (await page.isHidden(dateDeb)) {
+              await page.click(`#head${location.replaceAll(' ', '')}${hour}h .panel-title`)
+            }
 
-          const courtNumbers = !Array.isArray(config.locations) ? config.locations[location] : []
-          const slots = await page.locator(dateDeb).all()
-          for (const slot of slots) {
-            const bookSlotButton = `[courtid="${await slot.getAttribute('courtid')}"]${dateDeb}`
-            if (courtNumbers.length > 0) {
-              const courtName = (await page.locator(`.court:left-of(${bookSlotButton})`).innerText()).trim()
-              if (!courtNumbers.includes(parseInt(courtName.match(/Court N°(\d+)/)[1]))) {
+            const courtNumbers = !Array.isArray(config.locations) ? config.locations[location] : []
+            const slots = await page.locator(dateDeb).all()
+            for (const slot of slots) {
+              const bookSlotButton = `[courtid="${await slot.getAttribute('courtid')}"]${dateDeb}`
+              if (courtNumbers.length > 0) {
+                const courtName = (await page.locator(`.court:left-of(${bookSlotButton})`).innerText()).trim()
+                if (!courtNumbers.includes(parseInt(courtName.match(/Court N°(\d+)/)[1]))) {
+                  continue
+                }
+              }
+
+              const [priceType, courtType] = (await page.locator(`.row.tennis-court:has(${bookSlotButton})`).locator('.price-description').innerHTML()).split('<br>')
+              if (!config.priceType.includes(priceType) || !config.courtType.includes(courtType)) {
                 continue
               }
-            }
+              selectedHour = hour
+              await page.click(bookSlotButton)
 
-            const [priceType, courtType] = (await page.locator(`.row.tennis-court:has(${bookSlotButton})`).locator('.price-description').innerHTML()).split('<br>')
-            if (!config.priceType.includes(priceType) || !config.courtType.includes(courtType)) {
-              continue
+              break hoursLoop
             }
-            selectedHour = hour
-            await page.click(bookSlotButton)
-
-            break hoursLoop
           }
         }
-      }
 
-      if (await page.title() !== 'Paris | TENNIS - Reservation') {
-        console.log(`${dayjs().format()} - Failed to find reservation for ${logLocation}`)
-        continue
-      }
-
-      await page.waitForSelector('.order-steps-infos h2 >> text="1 / 3 - Validation du court"')
-
-      for (const [i, player] of config.players.entries()) {
-        if (i > 0) {
-          await page.click('.addPlayer')
+        if (await page.title() !== 'Paris | TENNIS - Reservation') {
+          console.log(`${dayjs().format()} - Failed to find reservation for ${logLocation}`)
+          continue locationsLoop
         }
-        await page.waitForSelector(`[name="player${i + 1}"]`)
-        await page.fill(`[name="player${i + 1}"] >> nth=0`, player.lastName)
-        await page.fill(`[name="player${i + 1}"] >> nth=1`, player.firstName)
-      }
 
-      await page.keyboard.press('Enter')
+        // if the slot was taken between the search and the click, the site shows an error page instead of step 1/3
+        await page.waitForSelector('.order-steps-infos h2 >> text="1 / 3 - Validation du court"', { timeout: 30000 })
 
-      await page.waitForSelector('#order_select_payment_form #paymentMode', { state: 'attached' })
-      const paymentMode = page.locator('#order_select_payment_form #paymentMode')
-      await paymentMode.evaluate(el => {
-        el.removeAttribute('readonly')
-        el.style.display = 'block'
-      })
-      await paymentMode.fill('existingTicket')
+        for (const [i, player] of config.players.entries()) {
+          if (i > 0) {
+            await page.click('.addPlayer')
+          }
+          await page.waitForSelector(`[name="player${i + 1}"]`)
+          await page.fill(`[name="player${i + 1}"] >> nth=0`, player.lastName)
+          await page.fill(`[name="player${i + 1}"] >> nth=1`, player.firstName)
+        }
 
-      if (DRY_RUN_MODE) {
-        console.log(`${dayjs().format()} - Fausse réservation faite : ${logLocation}`)
-        if (!process.env.GITHUB_ACTIONS) console.log(`pour le ${date.format('YYYY/MM/DD')} à ${selectedHour}h`)
-        console.log('----- DRY RUN END -----')
-        console.log('Pour réellement réserver un crénau, relancez le script sans le paramètre --dry-run')
+        await page.keyboard.press('Enter')
 
-        await page.click('#previous')
-        await page.click('#btnCancelBooking')
+        await page.waitForSelector('#order_select_payment_form #paymentMode', { state: 'attached' })
+        const paymentMode = page.locator('#order_select_payment_form #paymentMode')
+        await paymentMode.evaluate(el => {
+          el.removeAttribute('readonly')
+          el.style.display = 'block'
+        })
+        await paymentMode.fill('existingTicket')
+
+        if (DRY_RUN_MODE) {
+          console.log(`${dayjs().format()} - Fausse réservation faite : ${logLocation}`)
+          if (!process.env.GITHUB_ACTIONS) console.log(`pour le ${date.format('YYYY/MM/DD')} à ${selectedHour}h`)
+          console.log('----- DRY RUN END -----')
+          console.log('Pour réellement réserver un crénau, relancez le script sans le paramètre --dry-run')
+
+          await page.click('#previous')
+          await page.click('#btnCancelBooking')
+
+          break locationsLoop
+        }
+
+        const submit = page.locator('#order_select_payment_form #envoyer')
+        await submit.evaluate(el => el.classList.remove('hide'))
+        await submit.click()
+        submitted = true
+
+        // for free accounts (gratuité) the confirmation page differs, so do not fail if the usual element is missing
+        const confirmed = await page.waitForSelector('.confirmReservation', { timeout: 30000 }).then(() => true).catch(() => false)
+        if (!confirmed) {
+          console.log(`${dayjs().format()} - Réservation validée pour ${logLocation} le ${date.format('DD/MM/YYYY')} à ${selectedHour}h (page de confirmation non reconnue, vérifiez votre compte tennis.paris.fr)`)
+          if (config.ntfy?.enable === true || process.env.NTFY_TOPIC) {
+            try {
+              await fetch(`https://${config?.ntfy?.domain || process.env.NTFY_DOMAIN || 'ntfy.sh'}/${config?.ntfy?.topic || process.env.NTFY_TOPIC}`, {
+                method: 'POST',
+                headers: { Title: 'Paris Tennis', Tags: 'tennis' },
+                body: `Réservation faite pour le ${date.format('DD/MM/YYYY')} à ${selectedHour}h (${location})`,
+              })
+              console.log('Notification sent via ntfy')
+            } catch (err) {
+              console.log('Error while sending notification using ntfy:', err)
+            }
+          }
+          break locationsLoop
+        }
+
+        // Extract reservation details
+        const address = (await page.locator('.address').textContent()).trim().replace(/( ){2,}/g, ' ')
+        const dateStr = (await page.locator('.date').textContent()).trim().replace(/( ){2,}/g, ' ')
+        const court = (await page.locator('.court').textContent()).trim().replace(/( ){2,}/g, ' ')
+
+        if (!process.env.GITHUB_ACTIONS) {
+          console.log(`${dayjs().format()} - Réservation faite : ${address}`)
+          console.log(`pour le ${dateStr}`)
+          console.log(`sur le ${court}`)
+        } else {
+          console.log('Réservation faite, regardez vos emails ou rendez-vous sur votre compte tennis.paris.fr pour plus de détails sur votre réservation.')
+        }
+
+        const [day, month, year] = [date.date(), date.month() + 1, date.year()]
+        const hourMatch = dateStr.match(/(\d{2})h/)
+        const hour = hourMatch ? Number(hourMatch[1]) : 12
+        const start = [year, month, day, hour, 0]
+        const duration = { hours: 1, minutes: 0 }
+        const event = {
+          start,
+          duration,
+          title: 'Réservation Tennis',
+          description: `Court: ${court}\nAdresse: ${address}`,
+          location: address,
+          status: 'CONFIRMED',
+        }
+
+        const createdEvent = createEvent(event)
+        if (createdEvent.error) {
+          console.log('ICS creation error:', createdEvent.error)
+
+          break locationsLoop
+        }
+
+        const { value } = createdEvent
+        if (!process.env.GITHUB_ACTIONS) {
+          writeFileSync('event.ics', value)
+        }
+        if (config.ntfy?.enable === true || process.env.NTFY_TOPIC) {
+          await notify(Buffer.from(value, 'utf8'), 'event.ics',
+            `Confirmation pour le ${date.format('DD/MM/YYYY')} - ${hour}h`, {
+              domain: config?.ntfy?.domain || process.env.NTFY_DOMAIN,
+              topic: config?.ntfy?.topic || process.env.NTFY_TOPIC,
+            })
+        }
 
         break locationsLoop
+      } catch (e) {
+        const reason = String(e?.message || e).split('\n')[0]
+        console.log(`${dayjs().format()} - Erreur sur ${logLocation} (tentative ${attempt}/${MAX_ATTEMPTS_PER_LOCATION}) : ${reason}`)
+        if (submitted) {
+          // the booking was already sent to the site, never retry to avoid a double booking
+          console.log(`${dayjs().format()} - La réservation a été envoyée avant l'erreur, vérifiez votre compte tennis.paris.fr`)
+          break locationsLoop
+        }
+        // best effort: cancel any pending booking left open on the site before retrying
+        try {
+          const cancel = page.locator('#btnCancelBooking')
+          if (await cancel.count()) await cancel.first().click({ timeout: 5000 })
+        } catch {}
+        if (attempt === MAX_ATTEMPTS_PER_LOCATION) {
+          console.log(`${dayjs().format()} - Abandon de ${logLocation}, passage à la suivante`)
+        }
       }
-
-      const submit = page.locator('#order_select_payment_form #envoyer')
-      await submit.evaluate(el => el.classList.remove('hide'))
-      await submit.click()
-
-      await page.waitForSelector('.confirmReservation')
-
-      // Extract reservation details
-      const address = (await page.locator('.address').textContent()).trim().replace(/( ){2,}/g, ' ')
-      const dateStr = (await page.locator('.date').textContent()).trim().replace(/( ){2,}/g, ' ')
-      const court = (await page.locator('.court').textContent()).trim().replace(/( ){2,}/g, ' ')
-
-      if (!process.env.GITHUB_ACTIONS) {
-        console.log(`${dayjs().format()} - Réservation faite : ${address}`)
-        console.log(`pour le ${dateStr}`)
-        console.log(`sur le ${court}`)
-      } else {
-        console.log('Réservation faite, regardez vos emails ou rendez-vous sur votre compte tennis.paris.fr pour plus de détails sur votre réservation.')
       }
-
-      const [day, month, year] = [date.date(), date.month() + 1, date.year()]
-      const hourMatch = dateStr.match(/(\d{2})h/)
-      const hour = hourMatch ? Number(hourMatch[1]) : 12
-      const start = [year, month, day, hour, 0]
-      const duration = { hours: 1, minutes: 0 }
-      const event = {
-        start,
-        duration,
-        title: 'Réservation Tennis',
-        description: `Court: ${court}\nAdresse: ${address}`,
-        location: address,
-        status: 'CONFIRMED',
-      }
-
-      const createdEvent = createEvent(event)
-      if (createdEvent.error) {
-        console.log('ICS creation error:', createdEvent.error)
-
-        break
-      }
-
-      const { value } = createdEvent
-      if (!process.env.GITHUB_ACTIONS) {
-        writeFileSync('event.ics', value)
-      }
-      if (config.ntfy?.enable === true || process.env.NTFY_TOPIC) {
-        await notify(Buffer.from(value, 'utf8'), 'event.ics',
-          `Confirmation pour le ${date.format('DD/MM/YYYY')} - ${hour}h`, {
-            domain: config?.ntfy?.domain || process.env.NTFY_DOMAIN,
-            topic: config?.ntfy?.topic || process.env.NTFY_TOPIC,
-          })
-      }
-
-      break
     }
   } catch (e) {
     console.log(e)
