@@ -2,6 +2,19 @@ name: Tennis booking dry-run
 
 on:
   workflow_dispatch:
+    inputs:
+      date:
+        description: 'Date de test D/MM/YYYY (vide = J+6 comme le vrai bot)'
+        required: false
+        default: ''
+      hours:
+        description: 'Heures de test séparées par des virgules, ex 11,12 (vide = config)'
+        required: false
+        default: ''
+      locations:
+        description: 'Tennis de test séparés par des virgules (vide = config)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -26,11 +39,18 @@ jobs:
       - name: Create config.json from variables
         env:
           CONFIG_JSON: ${{ vars.CONFIG_JSON }}
+          IN_DATE: ${{ inputs.date }}
+          IN_HOURS: ${{ inputs.hours }}
+          IN_LOCATIONS: ${{ inputs.locations }}
         run: |
           set -euo pipefail
           if [ -n "${CONFIG_JSON:-}" ]; then
             printf "%s" "$CONFIG_JSON" > config.json
             echo "config.json created from CONFIG_JSON secret"
+            # optional test overrides, only for this dry run
+            if [ -n "${IN_DATE:-}" ]; then jq --arg d "$IN_DATE" '.date=$d' config.json > c.tmp && mv c.tmp config.json; fi
+            if [ -n "${IN_HOURS:-}" ]; then jq --arg h "$IN_HOURS" '.hours=($h|split(",")|map(gsub(" ";"")))' config.json > c.tmp && mv c.tmp config.json; fi
+            if [ -n "${IN_LOCATIONS:-}" ]; then jq --arg l "$IN_LOCATIONS" '.locations=($l|split(",")|map(sub("^ +";"")|sub(" +$";"")))' config.json > c.tmp && mv c.tmp config.json; fi
           else
             echo "ERROR: Missing CONFIG_JSON secret." >&2
             exit 1
@@ -56,7 +76,16 @@ jobs:
           ACCOUNT_PASSWORD: ${{ secrets.ACCOUNT_PASSWORD }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           NTFY_DOMAIN: ${{ secrets.NTFY_DOMAIN }}
-        run: npm run start-dry
+        run: |
+          set -o pipefail
+          npm run start-dry 2>&1 | tee run.log
+
+      - name: Log summary
+        if: always()
+        run: |
+          [ -f run.log ] || exit 0
+          s=$(grep -E ' - |DRY RUN' run.log | sed -E 's/^[0-9T:+-]+ - //' | tail -40 | sed ':a;N;$!ba;s/\n/%0A/g')
+          echo "::notice title=Resume du run::$s"
 
       - name: Upload failure screenshots
         if: always()

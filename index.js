@@ -78,10 +78,12 @@ const bookTennis = async () => {
         await page.click(`[dateiso="${date.format('DD/MM/YYYY')}"]`)
         await page.waitForSelector('.date-picker', { state: 'hidden' })
 
-        await page.click('#rechercher')
-
-        // wait until the results page is fully loaded before continue
-        await page.waitForLoadState('domcontentloaded')
+        // submit the search and wait for the results page, not the old one
+        await Promise.all([
+          page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
+          page.click('#rechercher'),
+        ])
+        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {})
 
         let selectedHour
         hoursLoop:
@@ -118,13 +120,17 @@ const bookTennis = async () => {
                 continue
               }
               selectedHour = hour
-              await page.click(bookSlotButton, { timeout: 10000 })
+              await Promise.all([
+                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {}),
+                page.click(bookSlotButton, { timeout: 10000 }),
+              ])
 
               break hoursLoop
             }
           }
         }
 
+        if (selectedHour) console.log(`${dayjs().format()} - Créneau trouvé à ${selectedHour}h sur ${logLocation}`)
         if (await page.title() !== 'Paris | TENNIS - Reservation') {
           console.log(`${dayjs().format()} - Failed to find reservation for ${logLocation}`)
           continue locationsLoop

@@ -65,7 +65,16 @@ jobs:
           ACCOUNT_PASSWORD: ${{ secrets.ACCOUNT_PASSWORD }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           NTFY_DOMAIN: ${{ secrets.NTFY_DOMAIN }}
-        run: npm start
+        run: |
+          set -o pipefail
+          npm start 2>&1 | tee run.log
+
+      - name: Log summary
+        if: always()
+        run: |
+          [ -f run.log ] || exit 0
+          s=$(grep -E ' - ' run.log | sed -E 's/^[0-9T:+-]+ - //' | tail -40 | sed ':a;N;$!ba;s/\n/%0A/g')
+          echo "::notice title=Resume du run::$s"
 
       - name: Upload failure screenshots
         if: always()
