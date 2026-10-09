@@ -131,6 +131,13 @@ const bookTennis = async () => {
         }
 
         if (selectedHour) console.log(`${dayjs().format()} - Créneau trouvé à ${selectedHour}h sur ${logLocation}`)
+
+        // Paris Tennis allows only one booking at a time: if one is already active, the site asks to replace it.
+        // Never replace an existing booking automatically, stop the run instead.
+        if (selectedHour && await page.getByText('déjà une réservation en cours').first().isVisible().catch(() => false)) {
+          console.log(`${dayjs().format()} - Tu as déjà une réservation en cours sur ton compte. Le bot ne la remplace pas et s'arrête. Annule-la sur tennis.paris.fr si tu veux qu'il réserve à la place.`)
+          break locationsLoop
+        }
         if (await page.title() !== 'Paris | TENNIS - Reservation') {
           if (selectedHour) {
             // a slot was clicked but the booking page did not open: log what the site shows instead
