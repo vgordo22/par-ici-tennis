@@ -132,6 +132,13 @@ const bookTennis = async () => {
 
         if (selectedHour) console.log(`${dayjs().format()} - Créneau trouvé à ${selectedHour}h sur ${logLocation}`)
         if (await page.title() !== 'Paris | TENNIS - Reservation') {
+          if (selectedHour) {
+            // a slot was clicked but the booking page did not open: log what the site shows instead
+            const title = await page.title().catch(() => '?')
+            const msg = await page.locator('.alert, .error, .message, .modal.in, .modal.show, .swal2-popup, [role=alertdialog]').allInnerTexts().catch(() => [])
+            console.log(`${dayjs().format()} - Clic sans ouverture de la réservation. Titre: "${title}" URL: ${page.url().split('?')[0]} Message: ${msg.join(' | ').replace(/\s+/g, ' ').slice(0, 300) || 'aucun'}`)
+            await page.screenshot({ path: `img/noreservation-location${i + 1}.png`, fullPage: true }).catch(() => {})
+          }
           console.log(`${dayjs().format()} - Failed to find reservation for ${logLocation}`)
           continue locationsLoop
         }
