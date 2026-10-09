@@ -70,7 +70,17 @@ const bookTennis = async () => {
           const dateDeb = `[datedeb="${date.format('YYYY/MM/DD')} ${hour}:00:00"]`
           if (await page.locator(dateDeb).count()) {
             if (await page.isHidden(dateDeb)) {
-              await page.click(`#head${location.replaceAll(' ', '')}${hour}h .panel-title`)
+              try {
+                await page.click(`#head${location.replaceAll(' ', '')}${hour}h .panel-title`, { timeout: 10000 })
+              } catch {
+                // fallback: expand the panel that contains this slot by clicking its own heading
+                await page.locator(dateDeb).first().evaluate((el) => {
+                  const panel = el.closest('.panel')
+                  const title = panel && panel.querySelector('.panel-title')
+                  if (title) title.click()
+                })
+              }
+              await page.waitForTimeout(500)
             }
 
             const courtNumbers = !Array.isArray(config.locations) ? config.locations[location] : []
@@ -89,7 +99,7 @@ const bookTennis = async () => {
                 continue
               }
               selectedHour = hour
-              await page.click(bookSlotButton)
+              await page.click(bookSlotButton, { timeout: 10000 })
 
               break hoursLoop
             }
@@ -209,6 +219,9 @@ const bookTennis = async () => {
       } catch (e) {
         const reason = String(e?.message || e).split('\n')[0]
         console.log(`${dayjs().format()} - Erreur sur ${logLocation} (tentative ${attempt}/${MAX_ATTEMPTS_PER_LOCATION}) : ${reason}`)
+        try {
+          await page.screenshot({ path: `img/failure-location${i + 1}-attempt${attempt}.png`, fullPage: true })
+        } catch {}
         if (submitted) {
           // the booking was already sent to the site, never retry to avoid a double booking
           console.log(`${dayjs().format()} - La réservation a été envoyée avant l'erreur, vérifiez votre compte tennis.paris.fr`)
