@@ -47,8 +47,27 @@ const bookTennis = async () => {
         console.log(`${dayjs().format()} - Search at ${logLocation}${attempt > 1 ? ` (tentative ${attempt})` : ''}`)
         await page.goto('https://tennis.paris.fr/tennis/jsp/site/Portal.jsp?page=recherche&view=recherche_creneau#!')
 
+        // the site remembers tennis selected in previous searches: remove them all first
+        const tokenInput = page.locator('.tokens-input-text')
+        const selectedTokens = page.locator('#whereToken li:not(.tokens-list-input-holder)')
+        for (let k = 0; k < 12 && await selectedTokens.count(); k++) {
+          await tokenInput.click({ timeout: 10000 })
+          await tokenInput.press('Backspace')
+          await page.waitForTimeout(150)
+        }
+        const remaining = await selectedTokens.count()
+        if (remaining) {
+          // fallback: click the close cross of each remaining token
+          for (const token of await selectedTokens.all()) {
+            await token.locator('span, a, button, i').last().click({ timeout: 3000 }).catch(() => {})
+          }
+        }
+        if (await selectedTokens.count()) {
+          console.log(`${dayjs().format()} - Attention : ${await selectedTokens.count()} tennis encore sélectionné(s) avant la recherche`)
+        }
+
         // select tennis location
-        await page.locator('.tokens-input-text').pressSequentially(`${location} `)
+        await tokenInput.pressSequentially(`${location} `)
         await page.waitForSelector(`.tokens-suggestions-list-element >> text="${location}"`)
         await page.click(`.tokens-suggestions-list-element >> text="${location}"`)
 
