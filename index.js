@@ -85,6 +85,14 @@ const bookTennis = async () => {
         ])
         await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {})
 
+        if (process.env.DEBUG_SLOTS) {
+          // diagnostic only: list which court types this tennis shows for the day
+          const types = await page.locator('.price-description').allInnerTexts().catch(() => [])
+          const counts = {}
+          for (const t of types) { const k = t.replace(/\s+/g, ' ').trim(); counts[k] = (counts[k] || 0) + 1 }
+          console.log(`${dayjs().format()} - Types de créneaux affichés pour ${location} : ${JSON.stringify(counts)}`)
+        }
+
         let selectedHour
         hoursLoop:
         for (const hour of config.hours) {

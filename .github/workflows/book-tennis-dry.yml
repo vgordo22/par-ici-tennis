@@ -15,6 +15,10 @@ on:
         description: 'Tennis de test séparés par des virgules (vide = config)'
         required: false
         default: ''
+      debug:
+        description: 'Afficher les types de courts vus (oui/vide)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -76,6 +80,7 @@ jobs:
           ACCOUNT_PASSWORD: ${{ secrets.ACCOUNT_PASSWORD }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           NTFY_DOMAIN: ${{ secrets.NTFY_DOMAIN }}
+          DEBUG_SLOTS: ${{ inputs.debug }}
         run: |
           set -o pipefail
           npm run start-dry 2>&1 | tee run.log
