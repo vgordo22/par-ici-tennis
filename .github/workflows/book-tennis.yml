@@ -2,8 +2,8 @@ name: Tennis booking
 
 on:
   schedule:
-    # Run 15 minutes early to account for possible delays in GitHub Actions scheduling.
-    - cron: '45 7 * * *'
+    # Run 45 minutes early: GitHub scheduled jobs can start more than 20 minutes late
+    - cron: '15 7 * * *'
       timezone: 'Europe/Paris'
   workflow_dispatch:
 
