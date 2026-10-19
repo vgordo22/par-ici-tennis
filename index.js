@@ -81,7 +81,8 @@ const runSearch = async (page, date) => {
     page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
     page.click('#rechercher'),
   ])
-  await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
+  // results are in the HTML itself, no need to wait for every network request to settle
+  await page.waitForSelector('.search-result-block, #courtList, .tennis-court, .no-result, .alert', { timeout: 3000 }).catch(() => {})
 }
 
 // From the results page, list matching slots ordered by tennis priority then hour priority
@@ -159,8 +160,10 @@ const bookTennis = async () => {
 
     for (let round = 1; round <= MAX_ROUNDS && !done; round++) {
       if (round > 1) await prepareSearchForm(page, locations).catch(() => {})
+      const tRun = Date.now()
       try {
         await runSearch(page, date)
+        log(`Recherche ${round} lancée et chargée en ${Date.now() - tRun} ms`)
       } catch (e) {
         // date not yet open (site clock slightly behind) or slow page: retry quickly
         log(`Recherche ${round} impossible (${String(e.message).split('\n')[0]}), nouvelle tentative`)
