@@ -81,6 +81,7 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           NTFY_DOMAIN: ${{ secrets.NTFY_DOMAIN }}
           DEBUG_SLOTS: ${{ inputs.debug }}
+          WAIT_8AM: ${{ inputs.debug == 'prep' && '1' || '' }}
         run: |
           set -o pipefail
           if [ "${DEBUG_SLOTS:-}" = "probe" ]; then

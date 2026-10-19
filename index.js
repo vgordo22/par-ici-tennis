@@ -71,10 +71,22 @@ const prepareSearchForm = async (page, locations) => {
   log(`Tennis sélectionnés : ${(await tokens.allInnerTexts()).map((t) => t.split('\n')[0].trim()).join(', ')}`)
 }
 
+// Open the date picker and make sure the target day is offered; reload the page if it is not yet open
+const openDate = async (page, locations, date, deadline) => {
+  const sel = `[dateiso="${date.format('DD/MM/YYYY')}"]`
+  for (let k = 0; ; k++) {
+    await page.click('#when')
+    const ok = await page.locator(sel).first().waitFor({ state: 'visible', timeout: k === 0 ? 600 : 2500 }).then(() => true).catch(() => false)
+    if (ok) return true
+    if (Date.now() > deadline) return false
+    log(`Date ${date.format('DD/MM')} pas encore ouverte dans le calendrier, rechargement de la page`)
+    await prepareSearchForm(page, locations)
+  }
+}
+
 // Pick the date and launch the search
-const runSearch = async (page, date) => {
-  await page.click('#when')
-  await page.waitForSelector(`[dateiso="${date.format('DD/MM/YYYY')}"]`, { timeout: 10000 })
+const runSearch = async (page, locations, date, deadline) => {
+  if (!await openDate(page, locations, date, deadline)) throw new Error(`date ${date.format('DD/MM/YYYY')} indisponible`)
   await page.click(`[dateiso="${date.format('DD/MM/YYYY')}"]`)
   await page.waitForSelector('.date-picker', { state: 'hidden' })
   await Promise.all([
@@ -124,7 +136,7 @@ const expandPanel = async (page, location, hour, button) => {
 
 const bookTennis = async () => {
   const DRY_RUN_MODE = process.argv.includes('--dry-run')
-  const WAIT_8AM = !!process.env.WAIT_8AM && !DRY_RUN_MODE
+  const WAIT_8AM = !!process.env.WAIT_8AM // after 8:00 the wait itself is skipped, so this is safe in a dry run too
   if (DRY_RUN_MODE) {
     console.log('----- DRY RUN START -----')
     console.log('Script lancé en mode DRY RUN. Afin de tester votre configuration, une recherche va être lancé mais AUCUNE réservation ne sera réalisée')
@@ -150,7 +162,12 @@ const bookTennis = async () => {
     log('User connected')
 
     await prepareSearchForm(page, locations)
-    if (WAIT_8AM) await waitUntil8()
+    if (WAIT_8AM) {
+      // throwaway search for tomorrow so the site stores our tennis selection in the session
+      await runSearch(page, locations, dayjs().tz('Europe/Paris').add(1, 'day'), Date.now() + 5000).catch(() => {})
+      await prepareSearchForm(page, locations)
+      await waitUntil8()
+    }
 
     // ---- race starts here ----
     const date = config.date ? dayjs(config.date, 'D/MM/YYYY') : dayjs().tz('Europe/Paris').add(6, 'days')
@@ -162,7 +179,8 @@ const bookTennis = async () => {
       if (round > 1) await prepareSearchForm(page, locations).catch(() => {})
       const tRun = Date.now()
       try {
-        await runSearch(page, date)
+        // at 8:00 keep reloading up to 25 s if the day is not open yet (clock gap with the site)
+        await runSearch(page, locations, date, Date.now() + (WAIT_8AM && round === 1 ? 25000 : 3000))
         log(`Recherche ${round} lancée et chargée en ${Date.now() - tRun} ms`)
       } catch (e) {
         // date not yet open (site clock slightly behind) or slow page: retry quickly
