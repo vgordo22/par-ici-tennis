@@ -73,23 +73,6 @@ const prepareSearchForm = async (page, locations) => {
 
 // Pick the date and launch the search
 const runSearch = async (page, date) => {
-  // fast path: fill the form fields directly instead of using the date picker
-  const hours = config.hours.map(Number)
-  const range = `${Math.max(8, Math.min(...hours))}-${Math.min(22, Math.max(...hours) + 1)}`
-  const filled = await page.evaluate(({ d, range }) => {
-    const form = document.querySelector('#rechercher')?.form
-    if (!form || !form.elements.when) return false
-    form.elements.when.value = d
-    if (form.elements.hourRange) form.elements.hourRange.value = range
-    return true
-  }, { d: date.format('DD/MM/YYYY'), range }).catch(() => false)
-  if (filled) {
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
-      page.click('#rechercher'),
-    ])
-    return
-  }
   await page.click('#when')
   await page.waitForSelector(`[dateiso="${date.format('DD/MM/YYYY')}"]`, { timeout: 10000 })
   await page.click(`[dateiso="${date.format('DD/MM/YYYY')}"]`)
