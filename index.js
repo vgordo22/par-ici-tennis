@@ -167,7 +167,9 @@ const bookTennis = async () => {
         await sleep(400)
         continue
       }
+      const tSearch = Date.now()
       const candidates = await findCandidates(page, locations, date, exclude)
+      log(`Analyse des résultats en ${Date.now() - tSearch} ms`)
       log(`Recherche ${round} : ${candidates.length} créneau(x) compatible(s)${candidates.length ? `, meilleur ${candidates[0].hour}h sur location ${candidates[0].index + 1}` : ''}`)
       if (!candidates.length) {
         // right at 8:00 the slots can appear a fraction of a second late: retry the first rounds
@@ -179,10 +181,10 @@ const bookTennis = async () => {
         const logLocation = process.env.GITHUB_ACTIONS ? `location ${c.index + 1}` : c.location
         const button = page.locator(`#courtList${noSpace(c.location)} [courtid="${c.courtid}"]${c.dateDeb}`).first()
         try {
-          await expandPanel(page, c.location, c.hour, button)
+          // results of several tennis are shown collapsed: trigger the button directly, visible or not
           await Promise.all([
             page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}),
-            button.click({ timeout: 5000 }),
+            button.evaluate((el) => el.click()),
           ])
         } catch (e) {
           log(`Clic impossible sur ${c.hour}h ${logLocation} : ${String(e.message).split('\n')[0]}`)
