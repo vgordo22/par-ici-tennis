@@ -83,7 +83,11 @@ jobs:
           DEBUG_SLOTS: ${{ inputs.debug }}
         run: |
           set -o pipefail
-          npm run start-dry 2>&1 | tee run.log
+          if [ "${DEBUG_SLOTS:-}" = "probe" ]; then
+            node scripts/probe.js 2>&1 | tee run.log
+          else
+            npm run start-dry 2>&1 | tee run.log
+          fi
 
       - name: Log summary
         if: always()
