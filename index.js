@@ -190,6 +190,12 @@ const bookTennis = async () => {
       const tSearch = Date.now()
       const candidates = await findCandidates(page, locations, date, exclude)
       log(`Analyse des résultats en ${Date.now() - tSearch} ms`)
+      if (process.env.DEBUG_SLOTS || DRY_RUN_MODE) {
+        const all = await page.locator('[datedeb]').evaluateAll((els) => els.map((e) => e.getAttribute('datedeb')))
+        const days = [...new Set(all.map((d) => d.slice(0, 10)))]
+        const hrs = [...new Set(all.map((d) => d.slice(11, 13)))].sort()
+        log(`Résultats bruts : ${all.length} boutons, jours ${days.join(' ')}, heures ${hrs.join(' ')}`)
+      }
       log(`Recherche ${round} : ${candidates.length} créneau(x) compatible(s)${candidates.length ? `, meilleur ${candidates[0].hour}h sur location ${candidates[0].index + 1}` : ''}`)
       if (!candidates.length) {
         // right at 8:00 the slots can appear a fraction of a second late: retry the first rounds
