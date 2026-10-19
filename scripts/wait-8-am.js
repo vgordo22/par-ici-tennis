@@ -7,7 +7,9 @@ dayjs.extend(timezone)
 
 const wait8AM = async () => {
   const now = dayjs().tz('Europe/Paris')
-  let next8AM = now.hour(8).minute(0).second(0).millisecond(0)
+  // WAIT_TARGET lets the workflow start the script a bit before 8:00 (login is done before the race)
+  const [h, m, sec] = (process.env.WAIT_TARGET || '08:00:00').split(':').map(Number)
+  let next8AM = now.hour(h).minute(m).second(sec || 0).millisecond(0)
 
   if (now.isAfter(next8AM)) {
     return

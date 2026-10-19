@@ -93,7 +93,7 @@ jobs:
         if: always()
         run: |
           [ -f run.log ] || exit 0
-          s=$(grep -E ' - |DRY RUN' run.log | sed -E 's/^[0-9T:+-]+ - //' | tail -40 | sed ':a;N;$!ba;s/\n/%0A/g')
+          s=$(grep -E ' - |DRY RUN' run.log | sed -E 's/^[0-9-]+T([0-9:.]+)[+-][0-9:]+ - /\1 /' | tail -40 | sed ':a;N;$!ba;s/\n/%0A/g')
           echo "::notice title=Resume du run::$s"
 
       - name: Upload failure screenshots

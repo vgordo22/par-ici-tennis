@@ -1,295 +1,308 @@
 import { chromium } from 'playwright'
 import dayjs from 'dayjs'
+import utc from 'dayjs/plugin/utc.js'
+import timezone from 'dayjs/plugin/timezone.js'
 import customParseFormat from 'dayjs/plugin/customParseFormat.js'
 import { writeFileSync } from 'fs'
 import { createEvent } from 'ics'
 import { config } from './staticFiles.js'
 import { notify } from './lib/ntfy.js'
 
+dayjs.extend(utc)
+dayjs.extend(timezone)
 dayjs.extend(customParseFormat)
+
+const SEARCH_URL = 'https://tennis.paris.fr/tennis/jsp/site/Portal.jsp?page=recherche&view=recherche_creneau#!'
+const log = (m) => console.log(`${dayjs().format('YYYY-MM-DDTHH:mm:ss.SSSZ')} - ${m}`)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const noSpace = (s) => s.replaceAll(' ', '')
+
+const ntfyEnabled = () => config.ntfy?.enable === true || !!process.env.NTFY_TOPIC
+const ntfyText = async (text) => {
+  if (!ntfyEnabled()) return
+  try {
+    await fetch(`https://${config?.ntfy?.domain || process.env.NTFY_DOMAIN || 'ntfy.sh'}/${config?.ntfy?.topic || process.env.NTFY_TOPIC}`, {
+      method: 'POST',
+      headers: { Title: 'Paris Tennis', Tags: 'tennis' },
+      body: text,
+    })
+    console.log('Notification sent via ntfy')
+  } catch (err) {
+    console.log('Error while sending notification using ntfy:', err)
+  }
+}
+
+// Wait until 08:00:00 Paris time plus a small margin (only for the scheduled run)
+const waitUntil8 = async () => {
+  const offsetMs = Number(process.env.START_OFFSET_MS ?? 100)
+  const now = dayjs().tz('Europe/Paris')
+  const target = now.hour(8).minute(0).second(0).millisecond(0).add(offsetMs, 'ms')
+  const ms = target.diff(now)
+  if (ms <= 0) return
+  log(`Prêt, attente jusqu'à 08:00:00 (+${offsetMs} ms), ${Math.round(ms / 1000)} s`)
+  if (ms > 1500) await sleep(ms - 1500)
+  while (dayjs().tz('Europe/Paris').isBefore(target)) await sleep(5)
+}
+
+// Select every configured tennis in the search form (one search covers all of them)
+const prepareSearchForm = async (page, locations) => {
+  await page.goto(SEARCH_URL)
+  const tokenInput = page.locator('.tokens-input-text')
+  const tokens = page.locator('#whereToken li:not(.tokens-list-input-holder)')
+  // the site remembers the last search: if it already holds exactly our tennis, keep them
+  const current = (await tokens.allInnerTexts()).map((t) => t.split('\n')[0].trim())
+  if (current.length === locations.length && locations.every((l) => current.includes(l))) return
+  for (let k = 0; k < 15 && await tokens.count(); k++) {
+    await tokenInput.click({ timeout: 10000 })
+    await tokenInput.press('Backspace')
+    await page.waitForTimeout(150)
+  }
+  for (const loc of locations) {
+    await tokenInput.pressSequentially(`${loc} `)
+    const sugg = page.locator(`.tokens-suggestions-list-element >> text="${loc}"`)
+    const ok = await sugg.first().waitFor({ timeout: 10000 }).then(() => true).catch(() => false)
+    if (!ok) {
+      log(`Tennis "${loc}" introuvable dans la liste du site, vérifie l'orthographe dans ta config`)
+      await tokenInput.fill('').catch(() => {})
+      continue
+    }
+    await sugg.first().click()
+  }
+  log(`Tennis sélectionnés : ${(await tokens.allInnerTexts()).map((t) => t.split('\n')[0].trim()).join(', ')}`)
+}
+
+// Pick the date and launch the search
+const runSearch = async (page, date) => {
+  await page.click('#when')
+  await page.waitForSelector(`[dateiso="${date.format('DD/MM/YYYY')}"]`, { timeout: 10000 })
+  await page.click(`[dateiso="${date.format('DD/MM/YYYY')}"]`)
+  await page.waitForSelector('.date-picker', { state: 'hidden' })
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
+    page.click('#rechercher'),
+  ])
+  await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
+}
+
+// From the results page, list matching slots ordered by tennis priority then hour priority
+const findCandidates = async (page, locations, date, exclude) => {
+  const out = []
+  for (const [i, location] of locations.entries()) {
+    const list = page.locator(`#courtList${noSpace(location)}`)
+    if (!await list.count()) continue
+    const courtNumbers = !Array.isArray(config.locations) ? (config.locations[location] || []) : []
+    for (const hour of config.hours) {
+      const h = String(hour).padStart(2, '0')
+      const dateDeb = `[datedeb="${date.format('YYYY/MM/DD')} ${h}:00:00"]`
+      const slots = await list.locator(dateDeb).all()
+      for (const slot of slots) {
+        const courtid = await slot.getAttribute('courtid')
+        if (exclude.has(courtid + dateDeb)) continue
+        const row = list.locator(`.row.tennis-court:has([courtid="${courtid}"]${dateDeb})`)
+        if (courtNumbers.length > 0) {
+          const courtName = (await row.locator('.court').first().innerText().catch(() => '')).trim()
+          const m = courtName.match(/Court N°(\d+)/)
+          if (!m || !courtNumbers.includes(parseInt(m[1]))) continue
+        }
+        const [priceType, courtType] = (await row.locator('.price-description').first().innerHTML()).split('<br>').map((s) => s.trim())
+        if (!config.priceType.includes(priceType) || !config.courtType.includes(courtType)) continue
+        out.push({ index: i, location, hour: h, courtid, dateDeb, courtType })
+      }
+    }
+  }
+  return out
+}
+
+const expandPanel = async (page, location, hour, button) => {
+  if (!await button.isHidden()) return
+  await page.click(`#head${noSpace(location)}${hour}h .panel-title`, { timeout: 3000 }).catch(async () => {
+    await button.evaluate((el) => el.closest('.panel')?.querySelector('.panel-title')?.click())
+  })
+  await button.waitFor({ state: 'visible', timeout: 3000 }).catch(() => {})
+}
 
 const bookTennis = async () => {
   const DRY_RUN_MODE = process.argv.includes('--dry-run')
+  const WAIT_8AM = !!process.env.WAIT_8AM && !DRY_RUN_MODE
   if (DRY_RUN_MODE) {
     console.log('----- DRY RUN START -----')
     console.log('Script lancé en mode DRY RUN. Afin de tester votre configuration, une recherche va être lancé mais AUCUNE réservation ne sera réalisée')
   }
 
-  console.log(`${dayjs().format()} - Starting searching tennis`)
+  const locations = !Array.isArray(config.locations) ? Object.keys(config.locations) : config.locations
+  log('Starting searching tennis')
   const browser = await chromium.launch({ headless: true, slowMo: 0, timeout: 90000 })
-
-  console.log(`${dayjs().format()} - Browser started`)
+  log('Browser started')
   const page = await browser.newPage()
   await page.route('https://captcha.liveidentity.com/captcha/public/frontend/api/v3/captcha-invisible/invisible-captcha-infos', (route) => route.abort())
   await page.route('https://captcha.liveidentity.com/captcha/public/frontend/api/v3/captchas**', (route) => route.abort())
-  page.setDefaultTimeout(90000)
-  await page.goto('https://tennis.paris.fr/tennis/jsp/site/Portal.jsp?page=tennis&view=start&full=1')
-
-  await page.click('#button_suivi_inscription')
-  await page.fill('#username', config?.account?.email || process.env.ACCOUNT_EMAIL)
-  await page.fill('#password', config?.account?.password || process.env.ACCOUNT_PASSWORD)
-  await page.click('#form-login >> button')
-
-  console.log(`${dayjs().format()} - User connected`)
-
-  // wait for login redirection before continue
-  await page.waitForSelector('.main-informations')
+  page.setDefaultTimeout(30000)
 
   try {
-    const locations = !Array.isArray(config.locations) ? Object.keys(config.locations) : config.locations
-    const MAX_ATTEMPTS_PER_LOCATION = 2
-    locationsLoop:
-    for (const [i, location] of locations.entries()) {
-      const logLocation = process.env.GITHUB_ACTIONS ? `location ${i + 1}` : location
-      let submitted = false
-      for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_LOCATION; attempt++) {
+    // ---- preparation, done before 8:00 on the scheduled run ----
+    await page.goto('https://tennis.paris.fr/tennis/jsp/site/Portal.jsp?page=tennis&view=start&full=1')
+    await page.click('#button_suivi_inscription')
+    await page.fill('#username', config?.account?.email || process.env.ACCOUNT_EMAIL)
+    await page.fill('#password', config?.account?.password || process.env.ACCOUNT_PASSWORD)
+    await page.click('#form-login >> button')
+    await page.waitForSelector('.main-informations')
+    log('User connected')
+
+    await prepareSearchForm(page, locations)
+    if (WAIT_8AM) await waitUntil8()
+
+    // ---- race starts here ----
+    const date = config.date ? dayjs(config.date, 'D/MM/YYYY') : dayjs().tz('Europe/Paris').add(6, 'days')
+    const exclude = new Set()
+    const MAX_ROUNDS = 6
+    let done = false
+
+    for (let round = 1; round <= MAX_ROUNDS && !done; round++) {
+      if (round > 1) await prepareSearchForm(page, locations).catch(() => {})
       try {
-        console.log(`${dayjs().format()} - Search at ${logLocation}${attempt > 1 ? ` (tentative ${attempt})` : ''}`)
-        await page.goto('https://tennis.paris.fr/tennis/jsp/site/Portal.jsp?page=recherche&view=recherche_creneau#!')
+        await runSearch(page, date)
+      } catch (e) {
+        // date not yet open (site clock slightly behind) or slow page: retry quickly
+        log(`Recherche ${round} impossible (${String(e.message).split('\n')[0]}), nouvelle tentative`)
+        await sleep(400)
+        continue
+      }
+      const candidates = await findCandidates(page, locations, date, exclude)
+      log(`Recherche ${round} : ${candidates.length} créneau(x) compatible(s)${candidates.length ? `, meilleur ${candidates[0].hour}h sur location ${candidates[0].index + 1}` : ''}`)
+      if (!candidates.length) {
+        // right at 8:00 the slots can appear a fraction of a second late: retry the first rounds
+        if (WAIT_8AM && round <= 2 && dayjs().tz('Europe/Paris').minute() === 0 && dayjs().tz('Europe/Paris').second() < 15) continue
+        break
+      }
 
-        // the site remembers tennis selected in previous searches: remove them all first
-        const tokenInput = page.locator('.tokens-input-text')
-        const selectedTokens = page.locator('#whereToken li:not(.tokens-list-input-holder)')
-        for (let k = 0; k < 12 && await selectedTokens.count(); k++) {
-          await tokenInput.click({ timeout: 10000 })
-          await tokenInput.press('Backspace')
-          await page.waitForTimeout(150)
+      for (const c of candidates) {
+        const logLocation = process.env.GITHUB_ACTIONS ? `location ${c.index + 1}` : c.location
+        const button = page.locator(`#courtList${noSpace(c.location)} [courtid="${c.courtid}"]${c.dateDeb}`).first()
+        try {
+          await expandPanel(page, c.location, c.hour, button)
+          await Promise.all([
+            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}),
+            button.click({ timeout: 5000 }),
+          ])
+        } catch (e) {
+          log(`Clic impossible sur ${c.hour}h ${logLocation} : ${String(e.message).split('\n')[0]}`)
+          exclude.add(c.courtid + c.dateDeb)
+          continue
         }
-        const remaining = await selectedTokens.count()
-        if (remaining) {
-          // fallback: click the close cross of each remaining token
-          for (const token of await selectedTokens.all()) {
-            await token.locator('span, a, button, i').last().click({ timeout: 3000 }).catch(() => {})
-          }
-        }
-        if (await selectedTokens.count()) {
-          console.log(`${dayjs().format()} - Attention : ${await selectedTokens.count()} tennis encore sélectionné(s) avant la recherche`)
-        }
+        log(`Créneau cliqué à ${c.hour}h sur ${logLocation}`)
 
-        // select tennis location
-        await tokenInput.pressSequentially(`${location} `)
-        await page.waitForSelector(`.tokens-suggestions-list-element >> text="${location}"`)
-        await page.click(`.tokens-suggestions-list-element >> text="${location}"`)
-
-        // select date
-        await page.click('#when')
-        const date = config.date ? dayjs(config.date, 'D/MM/YYYY') : dayjs().add(6, 'days')
-        await page.waitForSelector(`[dateiso="${date.format('DD/MM/YYYY')}"]`)
-        await page.click(`[dateiso="${date.format('DD/MM/YYYY')}"]`)
-        await page.waitForSelector('.date-picker', { state: 'hidden' })
-
-        // submit the search and wait for the results page, not the old one
-        await Promise.all([
-          page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
-          page.click('#rechercher'),
-        ])
-        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {})
-
-        if (process.env.DEBUG_SLOTS) {
-          // diagnostic only: list which court types this tennis shows for the day
-          const types = await page.locator('.price-description').allInnerTexts().catch(() => [])
-          const counts = {}
-          for (const t of types) { const k = t.replace(/\s+/g, ' ').trim(); counts[k] = (counts[k] || 0) + 1 }
-          console.log(`${dayjs().format()} - Types de créneaux affichés pour ${location} : ${JSON.stringify(counts)}`)
-        }
-
-        let selectedHour
-        hoursLoop:
-        for (const hour of config.hours) {
-          const dateDeb = `[datedeb="${date.format('YYYY/MM/DD')} ${hour}:00:00"]`
-          if (await page.locator(dateDeb).count()) {
-            if (await page.isHidden(dateDeb)) {
-              try {
-                await page.click(`#head${location.replaceAll(' ', '')}${hour}h .panel-title`, { timeout: 10000 })
-              } catch {
-                // fallback: expand the panel that contains this slot by clicking its own heading
-                await page.locator(dateDeb).first().evaluate((el) => {
-                  const panel = el.closest('.panel')
-                  const title = panel && panel.querySelector('.panel-title')
-                  if (title) title.click()
-                })
-              }
-              await page.waitForTimeout(500)
-            }
-
-            const courtNumbers = !Array.isArray(config.locations) ? config.locations[location] : []
-            const slots = await page.locator(dateDeb).all()
-            for (const slot of slots) {
-              const bookSlotButton = `[courtid="${await slot.getAttribute('courtid')}"]${dateDeb}`
-              if (courtNumbers.length > 0) {
-                const courtName = (await page.locator(`.court:left-of(${bookSlotButton})`).innerText()).trim()
-                if (!courtNumbers.includes(parseInt(courtName.match(/Court N°(\d+)/)[1]))) {
-                  continue
-                }
-              }
-
-              const [priceType, courtType] = (await page.locator(`.row.tennis-court:has(${bookSlotButton})`).locator('.price-description').innerHTML()).split('<br>')
-              if (!config.priceType.includes(priceType) || !config.courtType.includes(courtType)) {
-                continue
-              }
-              selectedHour = hour
-              await Promise.all([
-                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {}),
-                page.click(bookSlotButton, { timeout: 10000 }),
-              ])
-
-              break hoursLoop
-            }
-          }
-        }
-
-        if (selectedHour) console.log(`${dayjs().format()} - Créneau trouvé à ${selectedHour}h sur ${logLocation}`)
-
-        // Paris Tennis allows only one booking at a time: if one is already active, the site asks to replace it.
-        // Never replace an existing booking automatically, stop the run instead.
-        if (selectedHour && await page.getByText('déjà une réservation en cours').first().isVisible().catch(() => false)) {
-          console.log(`${dayjs().format()} - Tu as déjà une réservation en cours sur ton compte. Le bot ne la remplace pas et s'arrête. Annule-la sur tennis.paris.fr si tu veux qu'il réserve à la place.`)
-          break locationsLoop
+        // Paris Tennis allows only one booking at a time: never replace an existing one
+        if (await page.getByText('déjà une réservation en cours').first().isVisible().catch(() => false)) {
+          log("Tu as déjà une réservation en cours sur ton compte. Le bot ne la remplace pas et s'arrête. Annule-la sur tennis.paris.fr si tu veux qu'il réserve à la place.")
+          done = true
+          break
         }
         if (await page.title() !== 'Paris | TENNIS - Reservation') {
-          if (selectedHour) {
-            // a slot was clicked but the booking page did not open: log what the site shows instead
-            const title = await page.title().catch(() => '?')
-            const msg = await page.locator('.alert, .error, .message, .modal.in, .modal.show, .swal2-popup, [role=alertdialog]').allInnerTexts().catch(() => [])
-            console.log(`${dayjs().format()} - Clic sans ouverture de la réservation. Titre: "${title}" URL: ${page.url().split('?')[0]} Message: ${msg.join(' | ').replace(/\s+/g, ' ').slice(0, 300) || 'aucun'}`)
-            await page.screenshot({ path: `img/noreservation-location${i + 1}.png`, fullPage: true }).catch(() => {})
+          const msg = await page.locator('.alert, .error, .message, .modal.in, .modal.show, .swal2-popup, [role=alertdialog]').allInnerTexts().catch(() => [])
+          log(`Créneau ${c.hour}h ${logLocation} pris entre-temps (${msg.join(' | ').replace(/\s+/g, ' ').slice(0, 150) || 'pas de message'}), relance de la recherche`)
+          exclude.add(c.courtid + c.dateDeb)
+          break // results page is stale now: search again
+        }
+
+        let submitted = false
+        try {
+          await page.waitForSelector('.order-steps-infos h2 >> text="1 / 3 - Validation du court"', { timeout: 20000 })
+
+          for (const [i, player] of config.players.entries()) {
+            if (i > 0) await page.click('.addPlayer')
+            await page.waitForSelector(`[name="player${i + 1}"]`)
+            await page.fill(`[name="player${i + 1}"] >> nth=0`, player.lastName)
+            await page.fill(`[name="player${i + 1}"] >> nth=1`, player.firstName)
           }
-          console.log(`${dayjs().format()} - Failed to find reservation for ${logLocation}`)
-          continue locationsLoop
-        }
+          await page.keyboard.press('Enter')
 
-        // if the slot was taken between the search and the click, the site shows an error page instead of step 1/3
-        await page.waitForSelector('.order-steps-infos h2 >> text="1 / 3 - Validation du court"', { timeout: 30000 })
+          await page.waitForSelector('#order_select_payment_form #paymentMode', { state: 'attached' })
+          const paymentMode = page.locator('#order_select_payment_form #paymentMode')
+          await paymentMode.evaluate((el) => {
+            el.removeAttribute('readonly')
+            el.style.display = 'block'
+          })
+          await paymentMode.fill('existingTicket')
 
-        for (const [i, player] of config.players.entries()) {
-          if (i > 0) {
-            await page.click('.addPlayer')
+          if (DRY_RUN_MODE) {
+            log(`Fausse réservation faite : ${logLocation} à ${c.hour}h`)
+            console.log('----- DRY RUN END -----')
+            console.log('Pour réellement réserver un crénau, relancez le script sans le paramètre --dry-run')
+            await page.click('#previous')
+            await page.click('#btnCancelBooking')
+            done = true
+            break
           }
-          await page.waitForSelector(`[name="player${i + 1}"]`)
-          await page.fill(`[name="player${i + 1}"] >> nth=0`, player.lastName)
-          await page.fill(`[name="player${i + 1}"] >> nth=1`, player.firstName)
-        }
 
-        await page.keyboard.press('Enter')
+          const submit = page.locator('#order_select_payment_form #envoyer')
+          await submit.evaluate((el) => el.classList.remove('hide'))
+          await submit.click()
+          submitted = true
 
-        await page.waitForSelector('#order_select_payment_form #paymentMode', { state: 'attached' })
-        const paymentMode = page.locator('#order_select_payment_form #paymentMode')
-        await paymentMode.evaluate(el => {
-          el.removeAttribute('readonly')
-          el.style.display = 'block'
-        })
-        await paymentMode.fill('existingTicket')
+          // for free accounts (gratuité) the confirmation page differs, so do not fail if the usual element is missing
+          const confirmed = await page.waitForSelector('.confirmReservation', { timeout: 30000 }).then(() => true).catch(() => false)
+          if (!confirmed) {
+            log(`Réservation validée pour ${logLocation} le ${date.format('DD/MM/YYYY')} à ${c.hour}h (page de confirmation non reconnue, vérifiez votre compte tennis.paris.fr)`)
+            await ntfyText(`Réservation faite pour le ${date.format('DD/MM/YYYY')} à ${c.hour}h (${c.location})`)
+            done = true
+            break
+          }
 
-        if (DRY_RUN_MODE) {
-          console.log(`${dayjs().format()} - Fausse réservation faite : ${logLocation}`)
-          if (!process.env.GITHUB_ACTIONS) console.log(`pour le ${date.format('YYYY/MM/DD')} à ${selectedHour}h`)
-          console.log('----- DRY RUN END -----')
-          console.log('Pour réellement réserver un crénau, relancez le script sans le paramètre --dry-run')
+          const address = (await page.locator('.address').textContent()).trim().replace(/( ){2,}/g, ' ')
+          const dateStr = (await page.locator('.date').textContent()).trim().replace(/( ){2,}/g, ' ')
+          const court = (await page.locator('.court').textContent()).trim().replace(/( ){2,}/g, ' ')
+          if (!process.env.GITHUB_ACTIONS) {
+            log(`Réservation faite : ${address}`)
+            console.log(`pour le ${dateStr}`)
+            console.log(`sur le ${court}`)
+          } else {
+            log(`Réservation faite pour ${logLocation} le ${date.format('DD/MM/YYYY')} à ${c.hour}h`)
+          }
 
-          await page.click('#previous')
-          await page.click('#btnCancelBooking')
-
-          break locationsLoop
-        }
-
-        const submit = page.locator('#order_select_payment_form #envoyer')
-        await submit.evaluate(el => el.classList.remove('hide'))
-        await submit.click()
-        submitted = true
-
-        // for free accounts (gratuité) the confirmation page differs, so do not fail if the usual element is missing
-        const confirmed = await page.waitForSelector('.confirmReservation', { timeout: 30000 }).then(() => true).catch(() => false)
-        if (!confirmed) {
-          console.log(`${dayjs().format()} - Réservation validée pour ${logLocation} le ${date.format('DD/MM/YYYY')} à ${selectedHour}h (page de confirmation non reconnue, vérifiez votre compte tennis.paris.fr)`)
-          if (config.ntfy?.enable === true || process.env.NTFY_TOPIC) {
-            try {
-              await fetch(`https://${config?.ntfy?.domain || process.env.NTFY_DOMAIN || 'ntfy.sh'}/${config?.ntfy?.topic || process.env.NTFY_TOPIC}`, {
-                method: 'POST',
-                headers: { Title: 'Paris Tennis', Tags: 'tennis' },
-                body: `Réservation faite pour le ${date.format('DD/MM/YYYY')} à ${selectedHour}h (${location})`,
-              })
-              console.log('Notification sent via ntfy')
-            } catch (err) {
-              console.log('Error while sending notification using ntfy:', err)
+          const hourMatch = dateStr.match(/(\d{2})h/)
+          const hour = hourMatch ? Number(hourMatch[1]) : Number(c.hour)
+          const createdEvent = createEvent({
+            start: [date.year(), date.month() + 1, date.date(), hour, 0],
+            duration: { hours: 1, minutes: 0 },
+            title: 'Réservation Tennis',
+            description: `Court: ${court}\nAdresse: ${address}`,
+            location: address,
+            status: 'CONFIRMED',
+          })
+          if (!createdEvent.error) {
+            if (!process.env.GITHUB_ACTIONS) writeFileSync('event.ics', createdEvent.value)
+            if (ntfyEnabled()) {
+              await notify(Buffer.from(createdEvent.value, 'utf8'), 'event.ics',
+                `Confirmation pour le ${date.format('DD/MM/YYYY')} - ${hour}h`, {
+                  domain: config?.ntfy?.domain || process.env.NTFY_DOMAIN,
+                  topic: config?.ntfy?.topic || process.env.NTFY_TOPIC,
+                })
             }
           }
-          break locationsLoop
-        }
-
-        // Extract reservation details
-        const address = (await page.locator('.address').textContent()).trim().replace(/( ){2,}/g, ' ')
-        const dateStr = (await page.locator('.date').textContent()).trim().replace(/( ){2,}/g, ' ')
-        const court = (await page.locator('.court').textContent()).trim().replace(/( ){2,}/g, ' ')
-
-        if (!process.env.GITHUB_ACTIONS) {
-          console.log(`${dayjs().format()} - Réservation faite : ${address}`)
-          console.log(`pour le ${dateStr}`)
-          console.log(`sur le ${court}`)
-        } else {
-          console.log('Réservation faite, regardez vos emails ou rendez-vous sur votre compte tennis.paris.fr pour plus de détails sur votre réservation.')
-        }
-
-        const [day, month, year] = [date.date(), date.month() + 1, date.year()]
-        const hourMatch = dateStr.match(/(\d{2})h/)
-        const hour = hourMatch ? Number(hourMatch[1]) : 12
-        const start = [year, month, day, hour, 0]
-        const duration = { hours: 1, minutes: 0 }
-        const event = {
-          start,
-          duration,
-          title: 'Réservation Tennis',
-          description: `Court: ${court}\nAdresse: ${address}`,
-          location: address,
-          status: 'CONFIRMED',
-        }
-
-        const createdEvent = createEvent(event)
-        if (createdEvent.error) {
-          console.log('ICS creation error:', createdEvent.error)
-
-          break locationsLoop
-        }
-
-        const { value } = createdEvent
-        if (!process.env.GITHUB_ACTIONS) {
-          writeFileSync('event.ics', value)
-        }
-        if (config.ntfy?.enable === true || process.env.NTFY_TOPIC) {
-          await notify(Buffer.from(value, 'utf8'), 'event.ics',
-            `Confirmation pour le ${date.format('DD/MM/YYYY')} - ${hour}h`, {
-              domain: config?.ntfy?.domain || process.env.NTFY_DOMAIN,
-              topic: config?.ntfy?.topic || process.env.NTFY_TOPIC,
-            })
-        }
-
-        break locationsLoop
-      } catch (e) {
-        const reason = String(e?.message || e).split('\n')[0]
-        console.log(`${dayjs().format()} - Erreur sur ${logLocation} (tentative ${attempt}/${MAX_ATTEMPTS_PER_LOCATION}) : ${reason}`)
-        try {
-          await page.screenshot({ path: `img/failure-location${i + 1}-attempt${attempt}.png`, fullPage: true })
-        } catch {}
-        if (submitted) {
-          // the booking was already sent to the site, never retry to avoid a double booking
-          console.log(`${dayjs().format()} - La réservation a été envoyée avant l'erreur, vérifiez votre compte tennis.paris.fr`)
-          break locationsLoop
-        }
-        // best effort: cancel any pending booking left open on the site before retrying
-        try {
+          done = true
+          break
+        } catch (e) {
+          log(`Erreur pendant la réservation ${c.hour}h ${logLocation} : ${String(e?.message || e).split('\n')[0]}`)
+          await page.screenshot({ path: `img/failure-round${round}.png`, fullPage: true }).catch(() => {})
+          if (submitted) {
+            // the booking was already sent to the site, never retry to avoid a double booking
+            log("La réservation a été envoyée avant l'erreur, vérifiez votre compte tennis.paris.fr")
+            done = true
+            break
+          }
           const cancel = page.locator('#btnCancelBooking')
-          if (await cancel.count()) await cancel.first().click({ timeout: 5000 })
-        } catch {}
-        if (attempt === MAX_ATTEMPTS_PER_LOCATION) {
-          console.log(`${dayjs().format()} - Abandon de ${logLocation}, passage à la suivante`)
+          if (await cancel.count().catch(() => 0)) await cancel.first().click({ timeout: 5000 }).catch(() => {})
+          exclude.add(c.courtid + c.dateDeb)
+          break // search again with fresh results
         }
-      }
       }
     }
-  } catch (e) {
-    console.log(e)
-    const screenshot = await page.screenshot({ path: 'img/failure.png' })
 
-    if (config.ntfy?.enable === true || process.env.NTFY_TOPIC) {
+    if (!done) log('Aucune réservation faite')
+  } catch (e) {
+    log(`Erreur : ${String(e?.message || e).split('\n')[0]}`)
+    const screenshot = await page.screenshot({ path: 'img/failure.png' }).catch(() => null)
+    if (screenshot && ntfyEnabled()) {
       await notify(screenshot, 'failure.png', 'Erreur lors de l\'execution du programme.', {
         domain: config?.ntfy?.domain || process.env.NTFY_DOMAIN,
         topic: config?.ntfy?.topic || process.env.NTFY_TOPIC,
