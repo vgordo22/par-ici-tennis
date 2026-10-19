@@ -44,12 +44,20 @@ try {
     await sugg.click()
   }
   log(`tokens selectionnes: ${JSON.stringify(await tokens.allInnerTexts())}`)
+  const formInfo = await page.evaluate(() => {
+    const b = document.querySelector('#rechercher'); const f = b && b.form
+    return f ? { action: f.getAttribute('action'), method: f.method, fields: [...new FormData(f).entries()].map(([k, v]) => `${k}=${String(v).slice(0, 40)}`) } : { noform: true, btn: b && b.outerHTML.slice(0, 200) }
+  })
+  log(`form avant date: ${JSON.stringify(formInfo)}`)
   await page.click('#when')
   const date = config.date ? dayjs(config.date, 'D/MM/YYYY') : dayjs().add(6, 'days')
   await page.click(`[dateiso="${date.format('DD/MM/YYYY')}"]`)
   await page.waitForSelector('.date-picker', { state: 'hidden' })
   await Promise.all([page.waitForNavigation({ waitUntil: 'domcontentloaded' }).catch(() => {}), page.click('#rechercher')])
   await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {})
+  log(`url apres recherche: ${page.url()}`)
+  const req = await page.evaluate(() => performance.getEntriesByType('navigation').map((n) => `${n.name} ${Math.round(n.duration)}ms ttfb ${Math.round(n.responseStart - n.requestStart)}ms`))
+  log(`navigation: ${JSON.stringify(req)}`)
   log(`recherche multi-tennis ${Date.now() - t1} ms, titre "${await page.title()}"`)
 
   const info = await page.evaluate(() => {
@@ -67,8 +75,6 @@ try {
   })
   log(`nb boutons creneaux: ${info.nBtns}`)
   log(`heads (${info.heads.length}): ${info.heads.slice(0, 40).join(', ')}`)
-  for (const s of info.sample) { log(`btn attrs: ${s.attrs}`); log(`btn chain: ${s.chain}`) }
-  for (const h of info.tennisBlocks) log(`head html: ${h}`)
 } catch (e) {
   log(`probe erreur: ${String(e.message).split('\n')[0]}`)
 }
