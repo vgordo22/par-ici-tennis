@@ -104,7 +104,7 @@ const findCandidates = async (page, locations, date, exclude) => {
     const list = page.locator(`#courtList${noSpace(location)}`)
     if (!await list.count()) continue
     const courtNumbers = !Array.isArray(config.locations) ? (config.locations[location] || []) : []
-    for (const hour of config.hours) {
+    for (const [hi, hour] of config.hours.entries()) {
       const h = String(hour).padStart(2, '0')
       const dateDeb = `[datedeb="${date.format('YYYY/MM/DD')} ${h}:00:00"]`
       const slots = await list.locator(dateDeb).all()
@@ -119,10 +119,13 @@ const findCandidates = async (page, locations, date, exclude) => {
         }
         const [priceType, courtType] = (await row.locator('.price-description').first().innerHTML()).split('<br>').map((s) => s.trim())
         if (!config.priceType.includes(priceType) || !config.courtType.includes(courtType)) continue
-        out.push({ index: i, location, hour: h, courtid, dateDeb, courtType })
+        out.push({ index: i, hourIndex: hi, location, hour: h, courtid, dateDeb, courtType })
       }
     }
   }
+  // "priority": "heure" in the config = best hour first across all tennis, then tennis order
+  const byHour = ['heure', 'hour', 'hours'].includes(String(process.env.PRIORITY || config.priority || '').toLowerCase())
+  if (byHour) out.sort((a, b) => a.hourIndex - b.hourIndex || a.index - b.index)
   return out
 }
 
