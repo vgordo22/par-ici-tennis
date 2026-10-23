@@ -1,23 +1,21 @@
 name: Tennis booking
 
+# Triggered at 7:50 Paris time, Tuesday to Friday, by cron-job.org through the GitHub API.
+# GitHub's own schedule is not used: it can start hours late or not at all.
+# To pause the bot, disable this workflow in the Actions tab.
 on:
-  schedule:
-    # Run 45 minutes early: GitHub scheduled jobs can start more than 20 minutes late
-    - cron: '15 7 * * *'
-      timezone: 'Europe/Paris'
   workflow_dispatch:
 
 permissions:
   contents: read
-  actions: write # to disable this workflow after it runs
 
 concurrency:
   group: ${{ github.workflow }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run-once:
-    name: Run script at 08:00 Europe/Paris and self-disable
+    name: Run script at 08:00 Europe/Paris
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -56,7 +54,6 @@ jobs:
         run: npx playwright install chromium --only-shell
 
       - name: Wait 08:00 Europe/Paris
-        if: github.event_name == 'schedule'
         env:
           WAIT_TARGET: '07:59:30'
         run: npm run wait
@@ -86,16 +83,3 @@ jobs:
           name: screenshots
           path: img/
           if-no-files-found: ignore
-
-      - name: Self-disable this workflow (GitHub CLI)
-        if: always()
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          echo "GitHub CLI version:" && gh --version
-          echo "Disabling workflow using gh..."
-          # Disable this workflow so it won't run automatically the next day
-          gh workflow disable .github/workflows/book-tennis.yml
-          echo "Workflow disabled. Re-enable it manually from the Actions tab when needed."
