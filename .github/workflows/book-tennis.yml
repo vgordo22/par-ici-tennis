@@ -1,6 +1,6 @@
 name: Tennis booking
 
-# Triggered at 7:50 Paris time, Tuesday to Friday, by cron-job.org through the GitHub API.
+# Triggered at 7:50 Paris time on Wednesdays (books the next Tuesday, J+6) by cron-job.org through the GitHub API.
 # GitHub's own schedule is not used: it can start hours late or not at all.
 # To pause the bot, disable this workflow in the Actions tab.
 on:
